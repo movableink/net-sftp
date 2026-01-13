@@ -4,8 +4,12 @@ source 'https://rubygems.org'
 gemspec
 
 # TODO: add to gemspec
-gem "bundler", "~> 2.1"
 gem "rake", "~> 12.0"
+
+# Development only
+gem "ostruct"
+gem "rdoc"
+gem "logger"
 
 gem 'byebug', group: %i[development test] if !Gem.win_platform? && RUBY_ENGINE == "ruby"
 
