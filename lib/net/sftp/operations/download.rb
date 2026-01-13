@@ -54,6 +54,11 @@ module Net; module SFTP; module Operations
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes.
+  # * <tt>:pipeline</tt> - the number of concurrent read requests per file.
+  #   Defaults to 1 (sequential reads). Increasing this can improve
+  #   throughput by mitigating network latency. Note that with pipelining
+  #   enabled (pipeline > 1), progress events for :get may report chunks
+  #   out of order as responses arrive asynchronously from the server.
   #
   # == Progress Monitoring
   #
@@ -152,6 +157,8 @@ module Net; module SFTP; module Operations
       @options = options
       @active = 0
       @properties = options[:properties] || {}
+      @short_read_sizes = []
+      @effective_read_size = nil
 
       self.logger = sftp.logger
 
@@ -204,7 +211,8 @@ module Net; module SFTP; module Operations
 
       # A simple struct for encapsulating information about a single remote
       # file or directory that needs to be downloaded.
-      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink)
+      Entry = Struct.new(:remote, :local, :directory, :size, :handle, :offset, :sink,
+                         :next_offset, :pending_requests, :eof_seen)
 
       #--
       # "ruby -w" hates private attributes, so we have to do these longhand
@@ -220,15 +228,43 @@ module Net; module SFTP; module Operations
       # The default read size.
       DEFAULT_READ_SIZE = 32_000
 
+      # Number of consecutive short reads needed before adapting read_size.
+      SHORT_READ_THRESHOLD = 3
+
       # The number of bytes to read at a time from remote files.
+      # May be reduced if server consistently caps responses.
       def read_size
-        options[:read_size] || DEFAULT_READ_SIZE
+        @effective_read_size || options[:read_size] || DEFAULT_READ_SIZE
       end
 
-      # The number of simultaneou SFTP requests to use to effect the download.
-      # Defaults to 16 for recursive downloads.
+      # Track short read sizes and adapt if server consistently caps.
+      # If we see the same short size SHORT_READ_THRESHOLD times, reduce read_size.
+      def track_short_read(actual_size, requested_size)
+        return if actual_size >= requested_size
+
+        if @short_read_sizes.last == actual_size
+          @short_read_sizes << actual_size
+        else
+          @short_read_sizes = [actual_size]
+        end
+
+        if @short_read_sizes.length >= SHORT_READ_THRESHOLD && @effective_read_size.nil?
+          @effective_read_size = actual_size
+        end
+      end
+
+      # The number of simultaneous SFTP requests to use to effect the download.
+      # Defaults to 16 for recursive downloads, or 2 for single file downloads.
+      # This controls how many files/directories are processed concurrently.
       def requests
         options[:requests] || (recursive? ? 16 : 2)
+      end
+
+      # The number of concurrent read requests per file (pipelining depth).
+      # Defaults to 1 (sequential reads). Increasing this can improve
+      # throughput by mitigating network latency. Minimum value is 1.
+      def pipeline
+        [options[:pipeline] || 1, 1].max
       end
 
       # Enqueues as many files and directories from the stack as possible
@@ -301,8 +337,9 @@ module Net; module SFTP; module Operations
         process_next_entry
       end
 
-      # Called when a file has been opened. This will call #download_next_chunk
-      # to initiate the data transfer.
+      # Called when a file has been opened. This will fire read requests
+      # to initiate data transfer. With pipeline > 1, multiple concurrent
+      # read requests are sent to improve throughput.
       def on_open(response)
         entry = response.request[:entry]
         raise StatusException.new(response, "open #{entry.remote}") unless response.ok?
@@ -310,36 +347,105 @@ module Net; module SFTP; module Operations
         entry.handle = response[:handle]
         entry.sink = entry.local.respond_to?(:write) ? entry.local : ::File.open(entry.local, "wb")
         entry.offset = 0
+        entry.next_offset = 0
+        entry.pending_requests = 0
+        entry.eof_seen = false
 
-        download_next_chunk(entry)
+        # Fire read requests to fill the pipeline
+        pipeline.times { download_next_chunk(entry) }
       end
 
       # Initiates a read of the next #read_size bytes from the file.
+      # Uses next_offset to track which offset to request next, allowing
+      # multiple concurrent read requests (pipelining).
       def download_next_chunk(entry)
-        request = sftp.read(entry.handle, entry.offset, read_size, &method(:on_read))
+        return if entry.eof_seen
+
+        offset = entry.next_offset
+        entry.next_offset += read_size
+        entry.pending_requests += 1
+
+        request = sftp.read(entry.handle, offset, read_size, &method(:on_read))
         request[:entry] = entry
-        request[:offset] = entry.offset
+        request[:offset] = offset
+        request[:size] = read_size
       end
 
-      # Called when a read from a file finishes. If the read was successful
-      # and returned data, this will call #download_next_chunk to read the
-      # next bit from the file. Otherwise the file will be closed.
+      # Issues a read to fill a gap caused by a short read during pipelining.
+      # gap_size should be the size of the gap (read_size - actual_bytes_received).
+      def fill_gap(entry, gap_offset, gap_size)
+        return if entry.eof_seen
+
+        entry.pending_requests += 1
+        request = sftp.read(entry.handle, gap_offset, gap_size, &method(:on_read))
+        request[:entry] = entry
+        request[:offset] = gap_offset
+        request[:size] = gap_size
+      end
+
+      # Called when a read from a file finishes. Handles pipelined responses
+      # which may arrive out of order. Uses positioned writes to handle this.
+      # Only closes the file when all pending requests have completed.
       def on_read(response)
         entry = response.request[:entry]
+        entry.pending_requests -= 1
 
         if response.eof?
-          update_progress(:close, entry)
-          entry.sink.close
-          request = sftp.close(entry.handle, &method(:on_close))
-          request[:entry] = entry
+          entry.eof_seen = true
+          maybe_close_entry(entry)
         elsif !response.ok?
           raise StatusException.new(response, "read #{entry.remote}")
         else
-          entry.offset += response[:data].bytesize
-          update_progress(:get, entry, response.request[:offset], response[:data])
-          entry.sink.write(response[:data])
+          data = response[:data]
+          offset = response.request[:offset]
+
+          # Use positioned write since responses may arrive out of order
+          if entry.sink.respond_to?(:pwrite)
+            entry.sink.pwrite(data, offset)
+          else
+            entry.sink.seek(offset)
+            entry.sink.write(data)
+          end
+
+          entry.offset += data.bytesize
+          update_progress(:get, entry, offset, data)
+
+          # Check for short read (server returned less than requested).
+          # This can happen when server caps max read size.
+          requested_size = response.request[:size]
+          if data.bytesize < requested_size
+            # Track consecutive short reads to adapt read_size
+            track_short_read(data.bytesize, requested_size)
+
+            if pipeline == 1
+              # Sequential mode: adjust next_offset so the next request
+              # starts where this one actually ended.
+              entry.next_offset = offset + data.bytesize
+            else
+              # Pipelining mode: we may have a gap because later requests
+              # were already sent at offsets assuming full read_size chunks.
+              # Request only the gap size to avoid cascading short reads.
+              gap_size = requested_size - data.bytesize
+              fill_gap(entry, offset + data.bytesize, gap_size)
+            end
+          end
+
+          # Fire another request to keep the pipeline full
           download_next_chunk(entry)
+
+          maybe_close_entry(entry)
         end
+      end
+
+      # Closes the entry's file handle if all pending requests have completed
+      # and EOF has been seen from the server.
+      def maybe_close_entry(entry)
+        return unless entry.pending_requests == 0 && entry.eof_seen
+
+        update_progress(:close, entry)
+        entry.sink.close
+        request = sftp.close(entry.handle, &method(:on_close))
+        request[:entry] = entry
       end
 
       # Called when a file handle is closed.

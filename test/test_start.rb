@@ -21,13 +21,15 @@ class StartTest < Net::SFTP::TestCase
   def test_with_block_and_options
     ssh = mock('ssh')
     ssh.expects(:close)
-    Net::SSH.expects(:start).with('host', 'user', auth_methods: ["password"]).returns(ssh)
+    # In Ruby 3.x, hash arguments and keyword arguments are different.
+    # Net::SFTP.start passes ssh_options as a hash, not as keyword arguments.
+    Net::SSH.expects(:start).with('host', 'user', {auth_methods: ["password"]}).returns(ssh)
 
     sftp = mock('sftp')
     Net::SFTP::Session.expects(:new).with(ssh, 3).returns(sftp)
     sftp.expects(:connect!).returns(sftp)
     sftp.expects(:loop)
-    
+
     Net::SFTP.start('host', 'user', {auth_methods: ["password"]}, {version: 3}) do
       # NOTE: currently not called!
     end
