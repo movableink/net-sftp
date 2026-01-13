@@ -2,6 +2,15 @@ require 'minitest/autorun'
 require 'mocha/minitest'
 require 'stringio'
 
+# Silence warnings from dependencies (e.g., net-ssh) while keeping our own
+module WarningFilter
+  def warn(message, category: nil, **)
+    return if message.include?('/gems/net-ssh-')
+    super
+  end
+end
+Warning.extend(WarningFilter)
+
 begin
   require 'net/ssh'
   require 'net/ssh/version'

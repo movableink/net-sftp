@@ -66,7 +66,7 @@ module Net; module SFTP; module Operations
 
         if entry.directory? && !%w(. ..).include?(::File.basename(entry.name))
           queue += entries("#{path}/#{entry.name}").map do |e|
-            e.name.replace("#{entry.name}/#{e.name}")
+            e.name = "#{entry.name}/#{e.name}"
             e
           end
         end

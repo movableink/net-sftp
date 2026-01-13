@@ -9,7 +9,7 @@ module Net; module SFTP; module Protocol; module V04
   # a directory listing.
   class Name
     # The name of the item on the remote server.
-    attr_reader :name
+    attr_accessor :name
 
     # Attributes instance describing this item.
     attr_reader :attributes
@@ -39,11 +39,11 @@ module Net; module SFTP; module Protocol; module V04
     def longname
       @longname ||= begin
         longname = if directory?
-          "d"
+          +"d"
         elsif symlink?
-          "l"
+          +"l"
         else
-          "-"
+          +"-"
         end
 
         longname << (attributes.permissions & 0400 != 0 ? "r" : "-")

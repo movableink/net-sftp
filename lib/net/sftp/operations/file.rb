@@ -30,14 +30,14 @@ module Net; module SFTP; module Operations
       @pos      = 0
       @real_pos = 0
       @real_eof = false
-      @buffer   = ""
+      @buffer   = +""
     end
 
     # Repositions the file pointer to the given offset (relative to the
     # start of the file). This will also reset the EOF flag.
     def pos=(offset)
       @real_pos = @pos = offset
-      @buffer = ""
+      @buffer = +""
       @real_eof = false
     end
 
@@ -69,9 +69,10 @@ module Net; module SFTP; module Operations
       end
 
       if n
-        result, @buffer = @buffer[0,n], (@buffer[n..-1] || "")
+        tail = @buffer[n..-1]
+        result, @buffer = @buffer[0,n], (tail ? +tail : +"")
       else
-        result, @buffer = @buffer, ""
+        result, @buffer = @buffer, +""
       end
 
       @pos += result.length
@@ -104,16 +105,16 @@ module Net; module SFTP; module Operations
         if at
           offset = [at + delim.length, lim].min
           @pos += offset
-          line, @buffer = @buffer[0,offset], @buffer[offset..-1]
+          line, @buffer = @buffer[0,offset], +@buffer[offset..-1]
           return line
         elsif lim < @buffer.length
           @pos += lim
-          line, @buffer = @buffer[0,lim], @buffer[lim..-1]
+          line, @buffer = @buffer[0,lim], +@buffer[lim..-1]
           return line
         elsif !fill
           return nil if @buffer.empty?
           @pos += @buffer.length
-          line, @buffer = @buffer, ""
+          line, @buffer = @buffer, +""
           return line
         end
       end

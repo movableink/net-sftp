@@ -4,13 +4,6 @@ class FileOperationsTest < Net::SFTP::TestCase
   def setup
     @sftp = mock("sftp")
     @file = Net::SFTP::Operations::File.new(@sftp, "handle")
-    @save_dollar_fslash, $/ = $/, "\n"
-    @save_dollar_bslash, $\ = $\, nil
-  end
-
-  def teardown
-    $/ = @save_dollar_fslash
-    $\ = @save_dollar_bslash
   end
 
   def test_pos_assignment_should_set_position
@@ -178,9 +171,16 @@ class FileOperationsTest < Net::SFTP::TestCase
   end
 
   def test_print_with_no_arguments_should_write_dollar_bslash_if_dollar_bslash_is_not_nil
-    $\ = "-"
-    @sftp.expects(:write!).with("handle", 0, "-")
-    @file.print
+    original_deprecated = Warning[:deprecated]
+    Warning[:deprecated] = false
+    begin
+      $\ = "-"
+      @sftp.expects(:write!).with("handle", 0, "-")
+      @file.print
+    ensure
+      $\ = nil
+      Warning[:deprecated] = original_deprecated
+    end
   end
 
   def test_print_with_arguments_should_write_all_arguments

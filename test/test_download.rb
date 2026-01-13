@@ -9,7 +9,10 @@ class DownloadTest < Net::SFTP::TestCase
   end
 
   def teardown
+    verbose, $VERBOSE = $VERBOSE, nil
     File.define_singleton_method(:open, @original_file_open)
+  ensure
+    $VERBOSE = verbose
   end
 
   def test_download_file_should_transfer_remote_to_local
@@ -514,6 +517,7 @@ class DownloadTest < Net::SFTP::TestCase
 
       file = StringIO.new
       original_file_open = @original_file_open
+      verbose, $VERBOSE = $VERBOSE, nil
       File.define_singleton_method(:open) do |*args, **kwargs, &block|
         if args == [local, "wb"] && kwargs.empty?
           file
@@ -521,6 +525,7 @@ class DownloadTest < Net::SFTP::TestCase
           original_file_open.call(*args, **kwargs, &block)
         end
       end
+      $VERBOSE = verbose
 
       return file
     end
