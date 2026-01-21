@@ -374,8 +374,6 @@ module Net; module SFTP; module Operations
       # Issues a read to fill a gap caused by a short read during pipelining.
       # gap_size should be the size of the gap (read_size - actual_bytes_received).
       def fill_gap(entry, gap_offset, gap_size)
-        return if entry.eof_seen
-
         entry.pending_requests += 1
         request = sftp.read(entry.handle, gap_offset, gap_size, &method(:on_read))
         request[:entry] = entry

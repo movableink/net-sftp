@@ -469,6 +469,45 @@ class DownloadTest < Net::SFTP::TestCase
     end
   end
 
+  def test_download_with_pipelining_fills_gap_even_after_eof_seen
+    # This tests the scenario where EOF arrives BEFORE a short-read response.
+    # The gap fill must still happen even though eof_seen is already true.
+    local = "/path/to/local"
+    remote = "/path/to/remote"
+    chunk1 = "A" * 512   # offset 0-511 (short read, gap at 512-1023)
+    chunk2 = "B" * 512   # gap fill at 512-1023
+    text = chunk1 + chunk2
+
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, remote, :long, 0x01, :long, 0)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "handle")
+
+      # Pipeline sends 2 requests upfront
+      channel.sends_packet(FXP_READ, :long, 1, :string, "handle", :int64, 0, :long, 1024)
+      channel.sends_packet(FXP_READ, :long, 2, :string, "handle", :int64, 1024, :long, 1024)
+
+      # CRITICAL: EOF response for request 2 arrives FIRST, setting eof_seen=true
+      channel.gets_packet(FXP_STATUS, :long, 2, :long, 1)
+
+      # Now request 1 arrives with short read (512 bytes instead of 1024)
+      # fill_gap MUST still be called even though eof_seen is true
+      channel.gets_packet(FXP_DATA, :long, 1, :string, chunk1)
+      channel.sends_packet(FXP_READ, :long, 3, :string, "handle", :int64, 512, :long, 512)  # gap fill
+
+      # Gap fill returns the remaining data
+      channel.gets_packet(FXP_DATA, :long, 3, :string, chunk2)
+
+      channel.sends_packet(FXP_CLOSE, :long, 4, :string, "handle")
+      channel.gets_packet(FXP_STATUS, :long, 4, :long, 0)
+    end
+
+    file = StringIO.new
+    File.stubs(:open).with(local, "wb").returns(file)
+
+    assert_scripted_command { sftp.download(remote, local, :read_size => 1024, :pipeline => 2) }
+    assert_equal text, file.string
+  end
+
   private
 
     def expect_file_transfer(remote, text, opts={})
